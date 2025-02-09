@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from models.youtube_player import YouTubePlayer
 from views.music_view import MusicView
+from loguru import logger
 
 class MusicController(commands.Cog):
     """Controller for handling music commands"""
@@ -29,7 +30,7 @@ class MusicController(commands.Cog):
 
     @commands.command()
     async def play(self, ctx, url):
-        print(f"Received command: !play {url}")  # Debugging line
+        logger.info(f"Received command: !play {url}")  # Debugging line
         if ctx.author.voice is None:
             await ctx.send("❌ You need to be in a voice channel to use this command!")
             return
@@ -60,8 +61,4 @@ class MusicController(commands.Cog):
     @commands.command()
     async def queue(self, ctx):
         """Displays the current song queue."""
-        if self.yt_player.queue.empty():
-            await ctx.send("The queue is empty.")
-        else:
-            queue_list = list(self.yt_player.queue._queue)
-            await ctx.send(f"Upcoming songs:\n" + "\n".join(queue_list))
+        self.yt_player.print_queue(ctx)
