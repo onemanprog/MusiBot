@@ -14,6 +14,15 @@ class YouTubePlayer:
         """Adds a song to the queue."""
         self.queue.append(url)
 
+    async def print_queue(self, ctx):
+        """Prints the current queue."""
+        if not self.queue:
+            await ctx.send("🎵 Queue is empty.")
+            return
+
+        queue_list = "\n".join(self.queue)
+        await ctx.send(f"🎵 Queue:\n{queue_list}")
+
     async def process_queue(self, ctx):
         """Processes and plays the next song in the queue."""
         if not self.queue:
