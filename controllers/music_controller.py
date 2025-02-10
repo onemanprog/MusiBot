@@ -37,15 +37,26 @@ class MusicController(commands.Cog):
 
         channel = ctx.author.voice.channel
         if ctx.voice_client is None:
-            vc = await discord.VoiceChannel.connect(channel)
+            try:
+                vc = await discord.VoiceChannel.connect(channel)
+            except discord.errors.Forbidden:
+                await ctx.send("❌ I don't have permission to join this voice channel.")
+                return
+            except discord.errors.ClientException:
+                await ctx.send("❌ I'm already connected to a voice channel.")
+                return
         else:
             vc = ctx.voice_client
+
+        if not self.yt_player.is_valid_youtube_url(url):
+            await ctx.send("❌ Invalid YouTube URL. Please provide a valid link.")
+            return
 
         """Queues a song and starts playing if not already playing."""
         await self.yt_player.add_to_queue(url)
         await ctx.send(f"Added to queue: {url}")
 
-        if not ctx.voice_client.is_playing():
+        if ctx.voice_client and not ctx.voice_client.is_playing():
             await self.yt_player.process_queue(ctx)
 
     @commands.command()
@@ -53,12 +64,13 @@ class MusicController(commands.Cog):
         """Skips the current song and plays the next in queue."""
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.stop()
-            await ctx.send("Skipped!")
-            await self.yt_player.process_queue(ctx)
-        else:
-            await ctx.send("No song is playing.")
+            if self.yt_player.queue:
+                await ctx.send("⏭️ Skipping to next song...")
+                await self.yt_player.process_queue(ctx)
+            else:
+                await ctx.send("🚫 No more songs in the queue.")
 
     @commands.command()
     async def queue(self, ctx):
         """Displays the current song queue."""
-        self.yt_player.print_queue(ctx)
+        await self.yt_player.print_queue(ctx)

@@ -10,26 +10,27 @@ def main():
 
     # Intents setup
     intents = discord.Intents.default()
-    intents.messages = True
     intents.voice_states = True
     intents.message_content = True
 
     # Create bot instance
     bot = commands.Bot(command_prefix="!", intents=intents)
 
+    # Define the bot with a custom class to handle setup
+    class MyBot(commands.Bot):
+        async def setup_hook(self):
+            """Properly load cogs before bot starts."""
+            await self.add_cog(MusicController(self))
+
+    # Create bot instance
+    bot = MyBot(command_prefix="!", intents=intents)
+
     @bot.event
     async def on_ready():
         print(f"✅ Logged in as {bot.user.name}")
-            
-    on_ready()
 
-    async def setup(Bot):
-        await bot.add_cog(MusicController(bot=bot))
-        
-    asyncio.run(setup(bot))
+    # Run the bot
     bot.run(token)
-
-
     
 
     
