@@ -36,13 +36,16 @@ class SpotifySong(Song):
 class MusicQueue:
     def __init__(self):
         self.queue = asyncio.Queue()
+        self.queue_list = []  # Список для хранения песен
 
     async def add_to_queue(self, song):
         await self.queue.put(song)
+        self.queue_list.append(song)  # Добавляем песню в список
 
     async def process_queue(self, vc):
         while not self.queue.empty():
             song = await self.queue.get()
+            self.queue_list.pop(0)  # Удаляем из списка воспроизведенную песню
             await song.play(vc)
             await asyncio.sleep(1)
 
@@ -106,8 +109,8 @@ def setup_music_commands(bot):
 
     @bot.tree.command(name="queue", description="Displays the current song queue.")
     async def queue(interaction: discord.Interaction):
-        if not music_queue.queue:  # Эта проверка эквивалентна len(music_queue.queue) == 0
+        if not music_queue.queue_list:  # Проверяем список, а не очередь
             await interaction.response.send_message("The queue is empty.")
         else:
-            queue_list = [song.url for song in list(music_queue.queue)]
+            queue_list = [song.url for song in music_queue.queue_list]
             await interaction.response.send_message(f"Upcoming songs:\n" + "\n".join(queue_list))
