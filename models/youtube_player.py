@@ -56,7 +56,7 @@ class YouTubePlayer:
 
         # Play the audio
         vc.play(
-            discord.FFmpegPCMAudio(audio_url, executable=ffmpeg_path, **ffmpeg_options),
+            discord.FFmpegPCMAudio(audio_url, **ffmpeg_options),
             after=lambda e: self.loop.call_soon_threadsafe(
                 asyncio.create_task,  # Создаем задачу в основном цикле событий
                 self.process_queue(vc)  # Обрабатываем следующую песню в очереди
