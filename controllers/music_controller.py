@@ -1,21 +1,52 @@
 import discord
+import asyncio
+from discord import app_commands
 from discord.ext import commands
 from models.youtube_player import YouTubePlayer
 from views.music_view import MusicView
 from loguru import logger
 
-class MusicController(commands.Cog):
-    """Controller for handling music commands"""
 
-    def __init__(self, bot):
-        self.bot = bot
-        self.yt_player = YouTubePlayer()
+class Song:
+    def __init__(self, url):
+        self.url = url
 
-    @commands.command()
-    async def join(self, ctx):
-        """Joins a voice channel."""
-        if ctx.author.voice:
-            channel = ctx.author.voice.channel
+    async def play(self, vc):
+        raise NotImplementedError("Subclasses must implement play method")
+
+
+class YouTubeSong(Song):
+    def __init__(self, url):
+        super().__init__(url)
+        self.player = YouTubePlayer()
+
+    async def play(self, vc):
+        await self.player.play(vc, self.url)  # Вызываем метод play из YouTubePlayer
+
+
+class SpotifySong(Song):
+    def __init__(self, url):
+        super().__init__(url)
+        self.player = SpotifyPlayer()
+
+    async def play(self, vc):
+        await self.player.play(vc, self.url)
+
+
+class MusicQueue:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+
+    async def add_to_queue(self, song):
+        await self.queue.put(song)
+
+    async def process_queue(self, vc):
+        while not self.queue.empty():
+            song = await self.queue.get()
+            await song.play(vc)
+            await asyncio.sleep(1)
+
+
 def setup_music_commands(bot):
     music_queue = MusicQueue()
 
