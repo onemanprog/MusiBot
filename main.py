@@ -2,7 +2,7 @@ import asyncio
 import os
 import discord
 from discord.ext import commands
-from controllers.music_controller import MusicController
+from controllers.music_controller import setup_music_commands
 
 def main():
     # load_dotenv()
@@ -16,24 +16,17 @@ def main():
     # Create bot instance
     bot = commands.Bot(command_prefix="!", intents=intents)
 
-    # Define the bot with a custom class to handle setup
-    class MyBot(commands.Bot):
-        async def setup_hook(self):
-            """Properly load cogs before bot starts."""
-            await self.add_cog(MusicController(self))
-
-    # Create bot instance
-    bot = MyBot(command_prefix="!", intents=intents)
-
     @bot.event
     async def on_ready():
         print(f"✅ Logged in as {bot.user.name}")
+        await bot.tree.sync()  # Syncing slash commands when bot is ready
+
+    @bot.event
+    async def setup_hook():
+        setup_music_commands(bot)
 
     # Run the bot
     bot.run(token)
-    
-
-    
 
 if __name__ == "__main__":
     main()

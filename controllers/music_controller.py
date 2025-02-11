@@ -16,61 +16,67 @@ class MusicController(commands.Cog):
         """Joins a voice channel."""
         if ctx.author.voice:
             channel = ctx.author.voice.channel
+def setup_music_commands(bot):
+    music_queue = MusicQueue()
+
+    @bot.tree.command(name="join", description="Joins a voice channel.")
+    async def join(interaction: discord.Interaction):
+        if interaction.user.voice:
+            channel = interaction.user.voice.channel
             await channel.connect()
+            await interaction.response.send_message("✅ Joined the channel!")
         else:
-            await ctx.send("❌ You need to be in a voice channel to use this command!")
+            await interaction.response.send_message("❌ You need to be in a voice channel to use this command!")
 
-    @commands.command()
-    async def leave(self, ctx):
-        """Leaves the voice channel."""
-        if ctx.voice_client:
-            await ctx.voice_client.disconnect()
+    @bot.tree.command(name="leave", description="Leaves the voice channel.")
+    async def leave(interaction: discord.Interaction):
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.disconnect()
+            await interaction.response.send_message("✅ Left the voice channel!")
         else:
-            await ctx.send("I'm not in a voice channel!")
+            await interaction.response.send_message("❌ I'm not in a voice channel!")
 
-    @commands.command()
-    async def play(self, ctx, url):
-        logger.info(f"Received command: !play {url}")  # Debugging line
-        if ctx.author.voice is None:
-            await ctx.send("❌ You need to be in a voice channel to use this command!")
+    @bot.tree.command(name="play", description="Play a song from YouTube or Spotify.")
+    async def play(interaction: discord.Interaction, url: str):
+        if interaction.user.voice is None:
+            await interaction.response.send_message("❌ You need to be in a voice channel to use this command!")
             return
 
-        channel = ctx.author.voice.channel
-        if ctx.voice_client is None:
-            try:
-                vc = await discord.VoiceChannel.connect(channel)
-            except discord.errors.Forbidden:
-                await ctx.send("❌ I don't have permission to join this voice channel.")
-                return
-            except discord.errors.ClientException:
-                await ctx.send("❌ I'm already connected to a voice channel.")
-                return
+        channel = interaction.user.voice.channel
+        if interaction.guild.voice_client is None:
+            vc = await channel.connect()
         else:
-            vc = ctx.voice_client
+            vc = interaction.guild.voice_client
 
-        if not self.yt_player.is_valid_youtube_url(url):
-            await ctx.send("❌ Invalid YouTube URL. Please provide a valid link.")
+        # Определяем источник песни
+        if "youtube.com" in url or "youtu.be" in url:
+            song = YouTubeSong(url)
+        elif "open.spotify.com" in url:
+            song = SpotifySong(url)
+        else:
+            await interaction.response.send_message("❌ Invalid URL. Only YouTube and Spotify links are supported.")
             return
 
-        """Queues a song and starts playing if not already playing."""
-        await self.yt_player.add_to_queue(url)
-        await ctx.send(f"Added to queue: {url}")
+        await music_queue.add_to_queue(song)
+        await interaction.response.send_message(f"Added to queue: {url}")
 
-        if ctx.voice_client and not ctx.voice_client.is_playing():
-            await self.yt_player.process_queue(ctx)
+        # Если бот не воспроизводит музыку, начинаем воспроизведение
+        if not vc.is_playing():
+            await music_queue.process_queue(vc)  # Передаем vc вместо interaction
 
-    @commands.command()
-    async def skip(self, ctx):
-        """Skips the current song and plays the next in queue."""
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
-            if self.yt_player.queue:
-                await ctx.send("⏭️ Skipping to next song...")
-                await self.yt_player.process_queue(ctx)
-            else:
-                await ctx.send("🚫 No more songs in the queue.")
+    @bot.tree.command(name="skip", description="Skips the current song and plays the next in queue.")
+    async def skip(interaction: discord.Interaction):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.stop()
+            await interaction.response.send_message("Skipped!")
+            await music_queue.process_queue(interaction.guild.voice_client)
+        else:
+            await interaction.response.send_message("No song is playing.")
 
-    @commands.command()
-    async def queue(self, ctx):
-        """Displays the current song queue."""
-        await self.yt_player.print_queue(ctx)
+    @bot.tree.command(name="queue", description="Displays the current song queue.")
+    async def queue(interaction: discord.Interaction):
+        if not music_queue.queue:  # Эта проверка эквивалентна len(music_queue.queue) == 0
+            await interaction.response.send_message("The queue is empty.")
+        else:
+            queue_list = [song.url for song in list(music_queue.queue)]
+            await interaction.response.send_message(f"Upcoming songs:\n" + "\n".join(queue_list))
