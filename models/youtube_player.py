@@ -31,7 +31,7 @@ class YouTubePlayer:
                 info = ydl.extract_info(url, download=False)
                 audio_url = info['url']
 
-            ffmpeg_path = r"G:\Разработка\ffmpeg\bin\ffmpeg.exe"
+            #ffmpeg_path = r"G:\Разработка\ffmpeg\bin\ffmpeg.exe"
             ffmpeg_options = {
                 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
                 'options': '-vn'
@@ -44,7 +44,7 @@ class YouTubePlayer:
                 logger.info("Трек завершился")
 
             vc.play(
-                discord.FFmpegPCMAudio(audio_url, executable=ffmpeg_path, **ffmpeg_options),
+                discord.FFmpegPCMAudio(audio_url, **ffmpeg_options),
                 after=after_playing
             )
 
