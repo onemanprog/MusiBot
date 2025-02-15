@@ -36,28 +36,45 @@ class SpotifySong(Song):
 class MusicQueue:
     def __init__(self):
         self.queue = asyncio.Queue()
-        self.queue_list = []  # Список для отображения очереди пользователям
-        self.youtube_player = YouTubePlayer()  # Единственный обработчик
+        self.queue_list = []
+        self.youtube_player = YouTubePlayer()
 
     async def add_to_queue(self, song, vc):
-        """Добавляет песню в очередь и начинает воспроизведение, если очередь пуста."""
-        await self.queue.put(song)
-        self.queue_list.append(song)
+        """Добавляет песню или весь плейлист в очередь."""
+        url = song.url  # Получаем URL из объекта YouTubeSong
 
-        # Если ничего не играет, начинаем обработку очереди
+        if isinstance(url, str) and ("playlist?" in url or "list=" in url):
+            # Если это плейлист, загружаем все песни
+            songs = await self.youtube_player.extract_playlist(url)
+            if songs:
+                for song_url in songs:
+                    new_song = YouTubeSong(song_url)  # Создаем объекты YouTubeSong
+                    await self.queue.put(new_song)
+                    self.queue_list.append(new_song)
+                logger.info(f"Добавлено {len(songs)} треков из плейлиста!")
+            else:
+                logger.warning("Не удалось загрузить плейлист.")
+        else:
+            # Если это одиночное видео
+            await self.queue.put(song)
+            self.queue_list.append(song)
+
         if not vc.is_playing():
             await self.process_queue(vc)
 
     async def process_queue(self, vc):
-        """Извлекает и проигрывает песни по очереди."""
         while not self.queue.empty():
-            song = await self.queue.get()
-            self.queue_list.pop(0)  # Удаляем воспроизведенную песню
+            if vc.is_playing():  # Если уже играет - ждем окончания
+                await asyncio.sleep(1)
+                continue
 
-            # Вызываем метод play объекта песни (он уже знает, как ее воспроизвести)
+            song = await self.queue.get()
+            self.currently_playing = song
+
+            # Воспроизведение трека
             await song.play(vc)
 
-            # Ждем, пока песня закончится (иначе бот запустит несколько песен сразу)
+            # Ожидаем завершения трека
             while vc.is_playing():
                 await asyncio.sleep(1)
 
