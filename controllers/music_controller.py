@@ -36,18 +36,30 @@ class SpotifySong(Song):
 class MusicQueue:
     def __init__(self):
         self.queue = asyncio.Queue()
-        self.queue_list = []  # Список для хранения песен
+        self.queue_list = []  # Список для отображения очереди пользователям
+        self.youtube_player = YouTubePlayer()  # Единственный обработчик
 
-    async def add_to_queue(self, song):
+    async def add_to_queue(self, song, vc):
+        """Добавляет песню в очередь и начинает воспроизведение, если очередь пуста."""
         await self.queue.put(song)
-        self.queue_list.append(song)  # Добавляем песню в список
+        self.queue_list.append(song)
+
+        # Если ничего не играет, начинаем обработку очереди
+        if not vc.is_playing():
+            await self.process_queue(vc)
 
     async def process_queue(self, vc):
+        """Извлекает и проигрывает песни по очереди."""
         while not self.queue.empty():
             song = await self.queue.get()
-            self.queue_list.pop(0)  # Удаляем из списка воспроизведенную песню
+            self.queue_list.pop(0)  # Удаляем воспроизведенную песню
+
+            # Вызываем метод play объекта песни (он уже знает, как ее воспроизвести)
             await song.play(vc)
-            await asyncio.sleep(1)
+
+            # Ждем, пока песня закончится (иначе бот запустит несколько песен сразу)
+            while vc.is_playing():
+                await asyncio.sleep(1)
 
 
 def setup_music_commands(bot):
@@ -72,8 +84,10 @@ def setup_music_commands(bot):
 
     @bot.tree.command(name="play", description="Play a song from YouTube or Spotify.")
     async def play(interaction: discord.Interaction, url: str):
+        await interaction.response.defer()  # Даем Discord понять, что команда обрабатывается
+
         if interaction.user.voice is None:
-            await interaction.response.send_message("❌ You need to be in a voice channel to use this command!")
+            await interaction.followup.send("❌ You need to be in a voice channel to use this command!")
             return
 
         channel = interaction.user.voice.channel
@@ -88,15 +102,15 @@ def setup_music_commands(bot):
         elif "open.spotify.com" in url:
             song = SpotifySong(url)
         else:
-            await interaction.response.send_message("❌ Invalid URL. Only YouTube and Spotify links are supported.")
+            await interaction.followup.send("❌ Invalid URL. Only YouTube and Spotify links are supported.")
             return
 
-        await music_queue.add_to_queue(song)
-        await interaction.response.send_message(f"Added to queue: {url}")
+        await music_queue.add_to_queue(song, vc)  # Передаем vc в add_to_queue
+        await interaction.followup.send(f"✅ Added to queue: {url}")
 
         # Если бот не воспроизводит музыку, начинаем воспроизведение
         if not vc.is_playing():
-            await music_queue.process_queue(vc)  # Передаем vc вместо interaction
+            await music_queue.process_queue(vc)
 
     @bot.tree.command(name="skip", description="Skips the current song and plays the next in queue.")
     async def skip(interaction: discord.Interaction):

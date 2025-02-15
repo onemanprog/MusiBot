@@ -2,66 +2,54 @@ import asyncio
 import discord
 import yt_dlp
 from collections import deque
+from loguru import logger
 
 class YouTubePlayer:
-    """Handles YouTube audio playback and queue management."""
+    """Убираем лишнюю очередь, полагаемся на управление в MusicQueue."""
 
     def __init__(self):
-        self.queue = deque()
         self.loop = asyncio.get_event_loop()
         self.currently_playing = None
 
-    async def add_to_queue(self, url):
-        """Adds a song to the queue."""
-        self.queue.append(url)
-
     async def play(self, vc, url):
-        """Plays a song or adds it to the queue."""
-        await self.add_to_queue(url)  # Добавляем песню в очередь
+        """Загружает и воспроизводит YouTube-аудио."""
+        try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'ignoreerrors': True,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'http_headers': {'User-Agent': 'Mozilla/5.0'}
+            }
 
-        # Если ничего не воспроизводится, начинаем обработку очереди
-        if not vc.is_playing():
-            await self.process_queue(vc)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                audio_url = info['url']
 
-    async def process_queue(self, vc):
-        """Processes and plays the next song in the queue."""
-        if not self.queue:
-            return  # Если очередь пуста, ничего не делаем
+            ffmpeg_path = r"G:\Разработка\ffmpeg\bin\ffmpeg.exe"
+            ffmpeg_options = {
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn'
+            }
 
-        url = self.queue.popleft()
-        self.currently_playing = url
+            # Запускаем воспроизведение
+            def after_playing(error):
+                if error:
+                    logger.error(f"Ошибка воспроизведения: {error}")
+                logger.info("Трек завершился")
 
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,  # Ensures only single video is processed
-            'ignoreerrors': True,  # Prevents crash on unavailable videos
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-            'http_headers': {'User-Agent': 'Mozilla/5.0'}
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            audio_url = info['url']
-
-
-        ffmpeg_options = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': '-vn'
-        }
-
-        # Play the audio
-        vc.play(
-            discord.FFmpegPCMAudio(audio_url, executable=ffmpeg_path, **ffmpeg_options),
-            after=lambda e: self.loop.call_soon_threadsafe(
-                asyncio.create_task,  # Создаем задачу в основном цикле событий
-                self.process_queue(vc)  # Обрабатываем следующую песню в очереди
+            vc.play(
+                discord.FFmpegPCMAudio(audio_url, executable=ffmpeg_path, **ffmpeg_options),
+                after=after_playing
             )
-        )
+
+        except Exception as e:
+            logger.error(f"Ошибка воспроизведения: {e}")
 
     async def skip(self, vc):
         """Skips the current song."""
