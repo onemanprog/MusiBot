@@ -34,6 +34,13 @@ How It Works:
 ✅ !join / !leave → Manages voice channel connection.
 
 DEPLOY:
-1. create (if not exists) .env and set: DISCORD_BOT_TOKEN=
-2. docker build -t discord-music-bot .
-3. docker run --env-file .env --rm --name d_bot_cont discord-music-bot
+1. create (if not exists) .env and set: DISCORD_BOT_TOKEN= 
+2. cli command: source .env
+
+RUN LOCALY:
+3. /usr/local/bin/python -m pip install -r ./requirements.txt
+4. /usr/local/bin/python main.py (somehow many pythons on container)
+
+DEPLOY REMOTE:
+3. docker build -t discord-music-bot . 
+4. docker run --env-file .env --rm --name d_bot_cont discord-music-bot

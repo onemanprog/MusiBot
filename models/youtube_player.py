@@ -4,6 +4,8 @@ import yt_dlp
 from collections import deque
 from loguru import logger
 
+from discord.ext import commands
+
 class YouTubePlayer:
     """Проигрывает YouTube-видео и поддерживает работу с плейлистами."""
 
@@ -45,6 +47,8 @@ class YouTubePlayer:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 audio_url = info["url"]  # Просто берем URL без .decode()
+                title = info["title"]
+                await vc.send(f"🎵 Now playing {title}")
 
 
             #ffmpeg_path = r"G:\Разработка\ffmpeg\bin\ffmpeg.exe"
@@ -65,15 +69,35 @@ class YouTubePlayer:
 
         except Exception as e:
             logger.error(f"Ошибка воспроизведения: {e}")
+    
+    async def search_and_play(self, ctx: commands.Context, query):
+        """Searches for a song on YouTube and returns the first result."""
+        
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            'default_search': 'ytsearch',  # Enables YouTube search
+            'extract_flat': True  # Avoids downloading the video
+        }
 
-    async def skip(self, vc):
-        """Skips the current song."""
-        if vc and vc.is_playing():
-            vc.stop()
-            await self.process_queue(vc)  # Обрабатываем следующую песню в очереди
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(query, download=False)
+                if "entries" not in info or not info["entries"]:
+                    return None
+                
+                first_result = info["entries"][0]
+                url = first_result.get('webpage_url', 'URL not found')
+                title = first_result.get('title', 'Title not found')
 
-    async def stop(self, vc):
-        """Stops playback and clears the queue."""
-        if vc:
-            vc.stop()
-            self.queue.clear()
+                logger.debug(f"Found song: {title}")
+                logger.debug(f"Found url: {url}")
+
+                return title, url
+
+            except Exception as e:
+                logger.error(f"Error searching YouTube: {e}")
+                return None
+
+
