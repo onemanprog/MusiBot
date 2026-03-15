@@ -13,6 +13,7 @@ from models.spotify_player import SpotifyPlayer
 class ResolvedTrack:
     title: str
     url: str
+    search_query: str | None = None
 
 
 class YouTubePlayer:
@@ -80,7 +81,11 @@ class YouTubePlayer:
                 matched = await self.search(track.search_query)
             if matched is None:
                 return None
-            return ResolvedTrack(title=track.display_title, url=matched.url)
+            return ResolvedTrack(
+                title=matched.title,
+                url=matched.url,
+                search_query=track.search_query,
+            )
 
         resolved_candidates = await asyncio.gather(*[_resolve(track) for track in collection.tracks])
         resolved_tracks = [track for track in resolved_candidates if track is not None]
@@ -175,7 +180,7 @@ class YouTubePlayer:
                     logger.debug("YouTube search returned no entries")
                     continue
                 for entry in entries:
-                    track = self._track_from_entry(entry)
+                    track = self._track_from_entry(entry, search_query=normalized_query)
                     if track is not None:
                         logger.debug(f"YouTube search resolved track: {track}")
                         return track
@@ -234,7 +239,7 @@ class YouTubePlayer:
                 logger.debug("Fallback callback awaited after playback failure")
 
     @staticmethod
-    def _track_from_entry(entry) -> ResolvedTrack | None:
+    def _track_from_entry(entry, *, search_query: str | None = None) -> ResolvedTrack | None:
         if not entry:
             logger.debug("_track_from_entry received empty entry")
             return None
@@ -255,6 +260,6 @@ class YouTubePlayer:
         elif not webpage_url.startswith("http"):
             webpage_url = f"https://www.youtube.com/watch?v={webpage_url}"
 
-        track = ResolvedTrack(title=title, url=webpage_url)
+        track = ResolvedTrack(title=title, url=webpage_url, search_query=search_query)
         logger.debug(f"_track_from_entry resolved: {track}")
         return track
