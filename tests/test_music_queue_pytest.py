@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+import controllers.music_controller as music_controller
 from controllers.music_controller import MusicQueue, YouTubeSong
 from models.youtube_player import ResolvedTrack, YouTubePlayer
 
@@ -90,3 +91,39 @@ async def test_skip_stops_active_voice_client():
 
     assert skipped is True
     assert vc.stopped is True
+
+
+def test_snapshot_limit_returns_prefix():
+    queue = MusicQueue()
+    queue.queue_list.extend(
+        [
+            YouTubeSong(ResolvedTrack(title="one", url="https://youtu.be/one")),
+            YouTubeSong(ResolvedTrack(title="two", url="https://youtu.be/two")),
+            YouTubeSong(ResolvedTrack(title="three", url="https://youtu.be/three")),
+        ]
+    )
+
+    assert queue.snapshot(limit=2) == ["one", "two"]
+    assert queue.snapshot(limit=0) == []
+
+
+@pytest.mark.asyncio
+async def test_shuffle_queue_reorders_items(monkeypatch):
+    queue = MusicQueue()
+    queue.queue_list.extend(
+        [
+            YouTubeSong(ResolvedTrack(title="one", url="https://youtu.be/one")),
+            YouTubeSong(ResolvedTrack(title="two", url="https://youtu.be/two")),
+            YouTubeSong(ResolvedTrack(title="three", url="https://youtu.be/three")),
+        ]
+    )
+
+    def reverse_in_place(items):
+        items.reverse()
+
+    monkeypatch.setattr(music_controller.random, "shuffle", reverse_in_place)
+
+    shuffled_items = await queue.shuffle_queue()
+
+    assert shuffled_items == 3
+    assert queue.snapshot() == ["three", "two", "one"]

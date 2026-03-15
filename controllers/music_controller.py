@@ -1,4 +1,5 @@
 import asyncio
+import random
 from collections import deque
 from contextlib import suppress
 from typing import Sequence
@@ -20,9 +21,10 @@ def is_voice_dependency_error(exc: Exception) -> bool:
 
 
 class Song:
-    def __init__(self, url: str, title: str | None = None):
+    def __init__(self, url: str, title: str | None = None, requested_query: str | None = None):
         self.url = url
         self.title = title or url
+        self.requested_query = requested_query
 
     async def play(self, vc, callback=None):
         raise NotImplementedError("Subclasses must implement play()")
@@ -30,11 +32,14 @@ class Song:
 
 class YouTubeSong(Song):
     def __init__(self, track: ResolvedTrack):
-        super().__init__(track.url, track.title)
+        super().__init__(track.url, track.title, requested_query=track.search_query)
         self.player = YouTubePlayer()
 
     async def play(self, vc, callback=None):
-        logger.info(f"Starting YouTube song: {self.title}")
+        if self.requested_query:
+            logger.info(f"Starting YouTube song: {self.title} (search_query={self.requested_query})")
+        else:
+            logger.info(f"Starting YouTube song: {self.title}")
         logger.debug(f"Track URL: {self.url}")
         await self.player.play(vc, self.url, callback=callback)
 
@@ -56,7 +61,11 @@ async def resolve_spotify_tracks_to_youtube(
                 match = await youtube_player.search(track.search_query)
             if match is None:
                 return None
-            return ResolvedTrack(title=track.display_title, url=match.url)
+            return ResolvedTrack(
+                title=match.title,
+                url=match.url,
+                search_query=track.search_query,
+            )
         except Exception as exc:
             logger.exception(f"Failed to resolve Spotify track on YouTube ({track.display_title}): {exc}")
             return None
@@ -88,8 +97,9 @@ class MusicQueue:
         self._queue_lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
         self._voice_client = None
+        self._announce_channel = None
 
-    async def add_to_queue(self, songs: list[Song], vc):
+    async def add_to_queue(self, songs: list[Song], vc, announce_channel=None):
         if not songs:
             logger.debug("add_to_queue called with empty songs list")
             return
@@ -97,6 +107,8 @@ class MusicQueue:
         async with self._queue_lock:
             previous_len = len(self.queue_list)
             self._voice_client = vc
+            if announce_channel is not None:
+                self._announce_channel = announce_channel
             self.queue_list.extend(songs)
             should_start_worker = self._worker_task is None or self._worker_task.done()
             logger.debug(
@@ -127,8 +139,9 @@ class MusicQueue:
                 vc = self._voice_client
                 self.currently_playing = song
                 logger.debug(
-                    "Dequeued track for playback: title={}, queue_remaining={}",
+                    "Dequeued track for playback: title={}, search_query={}, queue_remaining={}",
                     song.title,
+                    song.requested_query,
                     len(self.queue_list),
                 )
 
@@ -141,6 +154,11 @@ class MusicQueue:
                 if not vc.is_connected():
                     logger.warning("Voice client is no longer connected; clearing playback loop")
                     return
+                if self._announce_channel is not None:
+                    try:
+                        await self._announce_channel.send(f"Now playing: {song.title}")
+                    except Exception as exc:
+                        logger.warning(f"Failed to send now-playing update to Discord: {exc}")
                 await song.play(vc, callback=mark_finished)
                 await asyncio.wait_for(song_finished.wait(), timeout=3600)
                 logger.debug(f"Track completed successfully: {song.title}")
@@ -163,6 +181,17 @@ class MusicQueue:
             return True
         return False
 
+    async def shuffle_queue(self) -> int:
+        async with self._queue_lock:
+            queue_len = len(self.queue_list)
+            if queue_len < 2:
+                return queue_len
+            shuffled = list(self.queue_list)
+            random.shuffle(shuffled)
+            self.queue_list = deque(shuffled)
+            logger.debug("Queue shuffled: items={}", len(self.queue_list))
+            return len(self.queue_list)
+
     async def teardown(self, vc=None):
         logger.debug("Tearing down music queue state")
         async with self._queue_lock:
@@ -173,6 +202,7 @@ class MusicQueue:
             if vc is None:
                 vc = self._voice_client
             self._voice_client = None
+            self._announce_channel = None
 
         if worker and not worker.done():
             worker.cancel()
@@ -184,8 +214,11 @@ class MusicQueue:
             vc.stop()
             logger.debug("Voice client playback stopped during teardown")
 
-    def snapshot(self) -> list[str]:
-        return [song.title for song in self.queue_list]
+    def snapshot(self, limit: int | None = None) -> list[str]:
+        titles = [song.title for song in self.queue_list]
+        if limit is None:
+            return titles
+        return titles[: max(0, limit)]
 
 
 async def ensure_voice_client(interaction: discord.Interaction):
@@ -284,7 +317,7 @@ def setup_music_commands(bot):
             return
         await interaction.response.send_message("I'm not in a voice channel.")
 
-    @bot.tree.command(name="play", description="Play music from YouTube or a Spotify URL.")
+    @bot.tree.command(name="play", description="Play music from a URL or search query.")
     async def play(interaction: discord.Interaction, url_or_query: str):
         logger.debug(
             "Command /play received: guild_id={} user_id={} input={}",
@@ -324,7 +357,7 @@ def setup_music_commands(bot):
                 return
 
             songs = [YouTubeSong(track) for track in resolved_tracks]
-            await music_queue.add_to_queue(songs, vc)
+            await music_queue.add_to_queue(songs, vc, announce_channel=interaction.channel)
 
             total = len(collection.tracks)
             added = len(resolved_tracks)
@@ -348,7 +381,7 @@ def setup_music_commands(bot):
             return
 
         songs = [YouTubeSong(track) for track in tracks]
-        await music_queue.add_to_queue(songs, vc)
+        await music_queue.add_to_queue(songs, vc, announce_channel=interaction.channel)
         logger.debug(f"Tracks added to queue: {len(tracks)}")
 
         if len(tracks) == 1:
@@ -372,10 +405,26 @@ def setup_music_commands(bot):
             return
         await interaction.response.send_message("No song is playing.")
 
-    @bot.tree.command(name="queue", description="Displays the current song queue.")
-    async def queue(interaction: discord.Interaction):
+    @bot.tree.command(name="stop", description="Stops playback and leaves the voice channel.")
+    async def stop(interaction: discord.Interaction):
         logger.debug(
-            "Command /queue received: guild_id={} user_id={}, queue_len={}, has_current={}",
+            "Command /stop received: guild_id={} user_id={}",
+            getattr(interaction.guild, "id", "unknown"),
+            getattr(interaction.user, "id", "unknown"),
+        )
+        vc = interaction.guild.voice_client
+        if vc:
+            await music_queue.teardown(vc)
+            if vc.is_connected():
+                await vc.disconnect()
+            await interaction.response.send_message("Stopped playback and left the voice channel.")
+            return
+        await interaction.response.send_message("I'm not in a voice channel.")
+
+    @bot.tree.command(name="shuffle", description="Shuffles the upcoming songs in the queue.")
+    async def shuffle(interaction: discord.Interaction):
+        logger.debug(
+            "Command /shuffle received: guild_id={} user_id={} queue_len={} has_current={}",
             getattr(interaction.guild, "id", "unknown"),
             getattr(interaction.user, "id", "unknown"),
             len(music_queue.queue_list),
@@ -385,12 +434,37 @@ def setup_music_commands(bot):
             await interaction.response.send_message("The queue is empty.")
             return
 
+        shuffled_items = await music_queue.shuffle_queue()
+        if shuffled_items < 2:
+            await interaction.response.send_message("Not enough songs in queue to shuffle.")
+            return
+        await interaction.response.send_message(f"Shuffled {shuffled_items} song(s) in queue.")
+
+    @bot.tree.command(name="queue", description="Displays the current song queue.")
+    async def queue(interaction: discord.Interaction, limit: discord.app_commands.Range[int, 1, 100] = 20):
+        logger.debug(
+            "Command /queue received: guild_id={} user_id={}, queue_len={}, has_current={}, limit={}",
+            getattr(interaction.guild, "id", "unknown"),
+            getattr(interaction.user, "id", "unknown"),
+            len(music_queue.queue_list),
+            music_queue.currently_playing is not None,
+            limit,
+        )
+        if music_queue.currently_playing is None and not music_queue.queue_list:
+            await interaction.response.send_message("The queue is empty.")
+            return
+
         lines = []
         if music_queue.currently_playing is not None:
             lines.append(f"Now playing: {music_queue.currently_playing.title}")
 
-        queued = music_queue.snapshot()
+        queued_total = len(music_queue.queue_list)
+        queued = music_queue.snapshot(limit=limit)
         if queued:
+            lines.append(f"Up next ({len(queued)}/{queued_total}):")
             lines.extend(f"{index}. {title}" for index, title in enumerate(queued, start=1))
+            hidden_tracks = queued_total - len(queued)
+            if hidden_tracks > 0:
+                lines.append(f"...and {hidden_tracks} more track(s).")
 
         await interaction.response.send_message("\n".join(lines))

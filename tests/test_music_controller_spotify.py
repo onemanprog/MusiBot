@@ -34,7 +34,15 @@ async def test_resolve_spotify_tracks_to_youtube_preserves_order_and_reports_mis
     )
 
     assert resolved == [
-        ResolvedTrack(title="First Song - First Artist", url="https://youtu.be/first"),
-        ResolvedTrack(title="Third Song - Third Artist", url="https://youtu.be/third"),
+        ResolvedTrack(
+            title="yt-first",
+            url="https://youtu.be/first",
+            search_query="First Song First Artist",
+        ),
+        ResolvedTrack(
+            title="yt-third",
+            url="https://youtu.be/third",
+            search_query="Third Song Third Artist",
+        ),
     ]
     assert unresolved == [SpotifyTrack(title="Second Song", artists=("Second Artist",))]

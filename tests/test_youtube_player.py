@@ -30,6 +30,18 @@ def test_track_from_entry_normalizes_watch_url(yt_player):
     assert track == ResolvedTrack(title="Song", url="https://www.youtube.com/watch?v=abc123")
 
 
+def test_track_from_entry_keeps_search_query(yt_player):
+    track = yt_player._track_from_entry(
+        {"title": "Song", "url": "/watch?v=abc123"},
+        search_query="song name",
+    )
+    assert track == ResolvedTrack(
+        title="Song",
+        url="https://www.youtube.com/watch?v=abc123",
+        search_query="song name",
+    )
+
+
 @pytest.mark.asyncio
 async def test_resolve_input_routes_search(monkeypatch, yt_player):
     async def fake_search(query):
