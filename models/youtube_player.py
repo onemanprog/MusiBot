@@ -6,6 +6,8 @@ import discord
 import yt_dlp
 from loguru import logger
 
+from models.spotify_player import SpotifyPlayer
+
 
 @dataclass(frozen=True)
 class ResolvedTrack:
@@ -35,19 +37,60 @@ class YouTubePlayer:
         query = parse_qs(parsed.query)
         return "list" in query
 
+    @staticmethod
+    def is_spotify_url(value: str) -> bool:
+        return SpotifyPlayer.is_spotify_url(value)
+
     async def resolve_input(self, value: str) -> list[ResolvedTrack]:
-        logger.debug(f"resolve_input called with value={value}")
-        if self.is_playlist_url(value):
+        normalized_value = (value or "").strip()
+        logger.debug(f"resolve_input called with value={normalized_value}")
+        if self.is_spotify_url(normalized_value):
+            logger.debug("Input classified as Spotify URL")
+            return await self.resolve_spotify_url(normalized_value)
+        if self.is_playlist_url(normalized_value):
             logger.debug("Input classified as playlist URL")
-            return await self.extract_playlist(value)
-        if self.is_youtube_url(value):
+            return await self.extract_playlist(normalized_value)
+        if self.is_youtube_url(normalized_value):
             logger.debug("Input classified as direct YouTube URL")
-            track = await self.extract_track(value)
+            track = await self.extract_track(normalized_value)
             return [track] if track else []
 
         logger.debug("Input classified as search query")
-        track = await self.search(value)
+        track = await self.search(normalized_value)
         return [track] if track else []
+
+    async def resolve_spotify_url(self, spotify_url: str) -> list[ResolvedTrack]:
+        spotify_player = SpotifyPlayer()
+        collection = await spotify_player.resolve_collection(spotify_url)
+        if collection is None or not collection.tracks:
+            logger.debug("Spotify URL resolution produced no tracks")
+            return []
+
+        logger.debug(
+            "Resolving Spotify tracks on YouTube: source_type={}, source_name={}, track_count={}",
+            collection.source_type,
+            collection.source_name,
+            len(collection.tracks),
+        )
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def _resolve(track) -> ResolvedTrack | None:
+            async with semaphore:
+                matched = await self.search(track.search_query)
+            if matched is None:
+                return None
+            return ResolvedTrack(title=track.display_title, url=matched.url)
+
+        resolved_candidates = await asyncio.gather(*[_resolve(track) for track in collection.tracks])
+        resolved_tracks = [track for track in resolved_candidates if track is not None]
+
+        logger.debug(
+            "Spotify URL resolved to playable YouTube tracks: resolved={}, skipped={}",
+            len(resolved_tracks),
+            len(collection.tracks) - len(resolved_tracks),
+        )
+        return resolved_tracks
 
     async def extract_playlist(self, playlist_url: str) -> list[ResolvedTrack]:
         ydl_opts = {
@@ -101,31 +144,45 @@ class YouTubePlayer:
             return None
 
     async def search(self, query: str) -> ResolvedTrack | None:
+        normalized_query = (query or "").strip()
+        if self.is_spotify_url(normalized_query):
+            logger.warning("Spotify URL passed to YouTube search; skipping direct yt-dlp lookup")
+            return None
+
         ydl_opts = {
             "quiet": True,
             "skip_download": True,
             "noplaylist": True,
-            "default_search": "ytsearch1",
+            "default_search": "ytsearch",
             "extract_flat": True,
+            "ignoreerrors": True,
         }
 
-        def _search():
+        def _search(search_expression: str):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(query, download=False)
+                return ydl.extract_info(search_expression, download=False)
 
-        try:
-            logger.debug(f"Executing YouTube search query: {query}")
-            info = await asyncio.to_thread(_search)
-            entries = info.get("entries") or []
-            if not entries:
-                logger.debug("YouTube search returned no entries")
-                return None
-            first_track = self._track_from_entry(entries[0])
-            logger.debug(f"YouTube search resolved track: {first_track}")
-            return first_track
-        except Exception as exc:
-            logger.exception(f"Error searching YouTube: {exc}")
-            return None
+        search_expressions = [
+            f"ytsearch5:{normalized_query}",
+            normalized_query,
+        ]
+        for expression in search_expressions:
+            try:
+                logger.debug(f"Executing YouTube search query: {expression}")
+                info = await asyncio.to_thread(_search, expression)
+                entries = info.get("entries") or []
+                if not entries:
+                    logger.debug("YouTube search returned no entries")
+                    continue
+                for entry in entries:
+                    track = self._track_from_entry(entry)
+                    if track is not None:
+                        logger.debug(f"YouTube search resolved track: {track}")
+                        return track
+            except Exception as exc:
+                logger.exception(f"Error searching YouTube with expression '{expression}': {exc}")
+
+        return None
 
     async def play(self, vc, url, callback=None):
         ydl_opts = {

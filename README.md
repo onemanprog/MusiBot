@@ -21,6 +21,7 @@ MODE=debug
 
 The bot reads `DISCORD_BOT_TOKEN` from the environment. `DISCORD_BOT_TOKEN_FILE` is supported as an optional fallback, but `.env` is the default workflow.
 Set `MODE=debug` to enable verbose debug logs in `docker logs`.
+Spotify album/playlist URL support extracts public page metadata without Spotify API authentication.
 
 ## Local Run Inside WSL
 
