@@ -1,10 +1,12 @@
 import asyncio
 from collections import deque
 from contextlib import suppress
+from typing import Sequence
 
 import discord
 from loguru import logger
 
+from models.spotify_player import SpotifyPlayer, SpotifyTrack
 from models.youtube_player import ResolvedTrack, YouTubePlayer
 
 
@@ -35,6 +37,47 @@ class YouTubeSong(Song):
         logger.info(f"Starting YouTube song: {self.title}")
         logger.debug(f"Track URL: {self.url}")
         await self.player.play(vc, self.url, callback=callback)
+
+
+async def resolve_spotify_tracks_to_youtube(
+    spotify_tracks: Sequence[SpotifyTrack],
+    youtube_player: YouTubePlayer,
+    *,
+    concurrency: int = 5,
+) -> tuple[list[ResolvedTrack], list[SpotifyTrack]]:
+    if not spotify_tracks:
+        return [], []
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def _resolve(track: SpotifyTrack) -> ResolvedTrack | None:
+        try:
+            async with semaphore:
+                match = await youtube_player.search(track.search_query)
+            if match is None:
+                return None
+            return ResolvedTrack(title=track.display_title, url=match.url)
+        except Exception as exc:
+            logger.exception(f"Failed to resolve Spotify track on YouTube ({track.display_title}): {exc}")
+            return None
+
+    resolved_candidates = await asyncio.gather(*[_resolve(track) for track in spotify_tracks])
+
+    resolved_tracks: list[ResolvedTrack] = []
+    unresolved_tracks: list[SpotifyTrack] = []
+    for original_track, candidate in zip(spotify_tracks, resolved_candidates):
+        if candidate is None:
+            unresolved_tracks.append(original_track)
+            continue
+        resolved_tracks.append(candidate)
+
+    logger.debug(
+        "Spotify->YouTube resolution completed: total={}, resolved={}, unresolved={}",
+        len(spotify_tracks),
+        len(resolved_tracks),
+        len(unresolved_tracks),
+    )
+    return resolved_tracks, unresolved_tracks
 
 
 class MusicQueue:
@@ -211,6 +254,7 @@ async def ensure_voice_client(interaction: discord.Interaction):
 def setup_music_commands(bot):
     music_queue = MusicQueue()
     youtube_player = YouTubePlayer()
+    spotify_player = SpotifyPlayer()
 
     @bot.tree.command(name="join", description="Joins a voice channel.")
     async def join(interaction: discord.Interaction):
@@ -240,7 +284,7 @@ def setup_music_commands(bot):
             return
         await interaction.response.send_message("I'm not in a voice channel.")
 
-    @bot.tree.command(name="play", description="Play music from YouTube.")
+    @bot.tree.command(name="play", description="Play music from YouTube or a Spotify URL.")
     async def play(interaction: discord.Interaction, url_or_query: str):
         logger.debug(
             "Command /play received: guild_id={} user_id={} input={}",
@@ -252,6 +296,49 @@ def setup_music_commands(bot):
 
         vc = await ensure_voice_client(interaction)
         if vc is None:
+            return
+
+        if spotify_player.is_spotify_url(url_or_query):
+            collection = await spotify_player.resolve_collection(url_or_query)
+            if collection is None or not collection.tracks:
+                await interaction.followup.send(
+                    "No playable tracks were found in the Spotify URL. "
+                    "The link may be private, geo-blocked, or blocked by network rules."
+                )
+                return
+
+            logger.debug(
+                "Spotify collection resolved: type={}, name={}, tracks={}",
+                collection.source_type,
+                collection.source_name,
+                len(collection.tracks),
+            )
+            resolved_tracks, unresolved_tracks = await resolve_spotify_tracks_to_youtube(
+                collection.tracks,
+                youtube_player,
+            )
+            if not resolved_tracks:
+                await interaction.followup.send(
+                    "Spotify tracks were found, but none could be matched on YouTube."
+                )
+                return
+
+            songs = [YouTubeSong(track) for track in resolved_tracks]
+            await music_queue.add_to_queue(songs, vc)
+
+            total = len(collection.tracks)
+            added = len(resolved_tracks)
+            missing = len(unresolved_tracks)
+            if missing == 0:
+                await interaction.followup.send(
+                    f"Added {added} tracks from Spotify {collection.source_type}: {collection.source_name}"
+                )
+                return
+
+            await interaction.followup.send(
+                f"Added {added}/{total} tracks from Spotify {collection.source_type}: "
+                f"{collection.source_name}. Could not match {missing} track(s) on YouTube."
+            )
             return
 
         tracks = await youtube_player.resolve_input(url_or_query)

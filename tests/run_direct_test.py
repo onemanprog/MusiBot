@@ -25,7 +25,13 @@ import pathlib
 root = pathlib.Path(__file__).resolve().parents[1]
 controllers_path = root / 'controllers' / 'music_controller.py'
 youtube_player_path = root / 'models' / 'youtube_player.py'
+spotify_player_path = root / 'models' / 'spotify_player.py'
 views_path = root / 'views' / 'music_view.py'
+
+# Create the `models` package for file-based imports used below.
+models_pkg = types.ModuleType("models")
+models_pkg.__path__ = [str(root / "models")]
+sys.modules["models"] = models_pkg
 
 # Insert a fake minimal `discord` package to avoid importing the real dependency
 fake_discord = types.ModuleType("discord")
@@ -53,6 +59,11 @@ spec2 = importlib.util.spec_from_file_location('models.youtube_player', str(yout
 youtube_mod = importlib.util.module_from_spec(spec2)
 sys.modules['models.youtube_player'] = youtube_mod
 spec2.loader.exec_module(youtube_mod)
+
+spec_spotify = importlib.util.spec_from_file_location('models.spotify_player', str(spotify_player_path))
+spotify_mod = importlib.util.module_from_spec(spec_spotify)
+sys.modules['models.spotify_player'] = spotify_mod
+spec_spotify.loader.exec_module(spotify_mod)
 
 spec3 = importlib.util.spec_from_file_location('views.music_view', str(views_path))
 views_mod = importlib.util.module_from_spec(spec3)
