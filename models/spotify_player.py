@@ -9,6 +9,7 @@ from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from loguru import logger
+from playwright.async_api import async_playwright
 
 
 SPOTIFY_WEB_BASE = "https://open.spotify.com"
@@ -104,59 +105,172 @@ class SpotifyPlayer:
         spotify_playlist_url: str,
         playlist_id: str,
     ) -> SpotifyCollection | None:
-        try:
-            landing_html = await asyncio.to_thread(self._fetch_html, CHOSIC_EXPORTER_URL)
-        except Exception as exc:
-            logger.warning(f"Failed to fetch Chosic exporter page: {exc}")
-            return None
-
-        form = self._extract_first_form(landing_html)
-        if form is None:
-            logger.debug("Chosic exporter form was not found")
-            return None
-
-        action_url, method, payload, target_field = form
-        if not target_field:
-            logger.debug("Chosic exporter form has no URL input field")
-            return None
-        payload[target_field] = spotify_playlist_url
-
-        try:
-            response_url, response_html = await asyncio.to_thread(
-                self._submit_form_and_read_html,
-                action_url,
-                method,
-                payload,
-                CHOSIC_EXPORTER_URL,
-            )
-        except Exception as exc:
-            logger.warning(f"Chosic form submission failed: {exc}")
-            return None
-
-        download_candidates = self._extract_export_download_links(response_html, response_url)
         tracks: list[SpotifyTrack] = []
-        source_name = self._extract_og_title(response_html) or f"playlist:{playlist_id}"
-
-        for download_url in download_candidates:
-            parsed_tracks = await asyncio.to_thread(self._download_and_parse_export, download_url)
-            if parsed_tracks:
-                tracks = parsed_tracks
-                logger.debug(
-                    "Chosic export parsed successfully: url={}, tracks={}",
-                    download_url,
-                    len(tracks),
-                )
-                break
-
-        if not tracks:
-            tracks = self._extract_tracks_from_simple_table(response_html)
-            if tracks:
-                logger.debug(f"Chosic fallback table parser hit: {len(tracks)} tracks")
-
+        source_name = f"playlist:{playlist_id}"
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page(user_agent=self._USER_AGENT)
+                
+                try:
+                    logger.debug(f"Navigating to Chosic exporter: {CHOSIC_EXPORTER_URL}")
+                    await page.goto(CHOSIC_EXPORTER_URL, wait_until="networkidle", timeout=300000)
+                    
+                    # Fill in the Spotify URL
+                    logger.debug(f"Filling in Spotify URL: {spotify_playlist_url}")
+                    await page.fill('input#search-word', spotify_playlist_url)
+                    
+                    # Click the Start button
+                    logger.debug("Clicking 'Start' button")
+                    await page.click('button#analyze')
+                    
+                    # Wait for the tracks table to appear (up to 5 minutes)
+                    logger.debug("Waiting for tracks table to appear...")
+                    await page.wait_for_selector('table#tracks-table', timeout=300000)
+                    
+                    # Extract tracks from the table using JavaScript
+                    extract_js = """
+                    () => {
+                        const table = document.getElementById('tracks-table');
+                        if (!table) return [];
+                        
+                        const tracks = [];
+                        const rows = table.querySelectorAll('tbody tr');
+                        if (!rows.length) return [];
+                        
+                        // Common UI button/action labels to filter out
+                        const uiLabels = new Set(['delete', 'edit', 'add', 'remove', 'play', 'pause', 'download', 'share', 'more', 'options', 'action', 'track', 'song', '×', '✕', '✘', '...']);
+                        
+                        // Find column indices for song and artist
+                        const headerRow = table.querySelector('thead tr');
+                        let songColIdx = -1;
+                        let artistColIdx = -1;
+                        
+                        if (headerRow) {
+                            const headers = headerRow.querySelectorAll('th');
+                            headers.forEach((th, idx) => {
+                                const text = th.textContent.toLowerCase().trim();
+                                // Match song/track columns
+                                if ((text.includes('song') || text.includes('track') || text.includes('title') || text.includes('name')) 
+                                    && !text.includes('artist') && !text.includes('id')) {
+                                    if (songColIdx === -1) songColIdx = idx;  // Take first match
+                                }
+                                // Match artist columns
+                                if (text.includes('artist') || text.includes('by')) {
+                                    if (artistColIdx === -1) artistColIdx = idx;  // Take first match
+                                }
+                            });
+                        }
+                        
+                        // Fallback: analyze first data row to detect columns by content
+                        if (songColIdx === -1 || artistColIdx === -1) {
+                            const firstRow = rows[0];
+                            if (firstRow) {
+                                const cells = firstRow.querySelectorAll('td');
+                                for (let i = 0; i < cells.length; i++) {
+                                    const cellText = cells[i].textContent.trim();
+                                    const isId = /^[a-zA-Z0-9]{20,}$/.test(cellText);  // Spotify IDs are 22 alphanumeric chars
+                                    const hasNumbers = /\\d{2,}/.test(cellText);
+                                    
+                                    if (songColIdx === -1 && !isId && !hasNumbers && cellText.length > 3) {
+                                        songColIdx = i;
+                                    } else if (artistColIdx === -1 && i !== songColIdx && !isId && !hasNumbers && cellText.length > 2) {
+                                        artistColIdx = i;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Default fallback (skip ID columns which are typically first)
+                        if (songColIdx === -1) songColIdx = 1;  // Skip column 0 (likely ID)
+                        if (artistColIdx === -1) artistColIdx = 2;
+                        
+                        // Helper to clean text of UI labels and extra whitespace
+                        function cleanText(text) {
+                            if (!text) return '';
+                            
+                            // Remove common UI button text patterns (case-insensitive)
+                            let cleaned = text
+                                .replace(/delete\\s+track[\\s\\n]*/gi, '')
+                                .replace(/edit\\s+track[\\s\\n]*/gi, '')
+                                .replace(/remove\\s+track[\\s\\n]*/gi, '');
+                            
+                            // Split by newlines/whitespace and filter
+                            const parts = cleaned.split(/[\\n\\r]+/).map(p => p.trim()).filter(p => {
+                                const lower = p.toLowerCase();
+                                // Skip if it's a UI label or too short
+                                return p.length > 1 && !uiLabels.has(lower) && !/^[❌✕×✘]+$/.test(p);
+                            });
+                            
+                            // Join with space, collapse multiple spaces
+                            return parts.join(' ').replace(/\\s+/g, ' ').trim();
+                        }
+                        
+                        rows.forEach(row => {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length > songColIdx) {
+                                let title = cleanText(cells[songColIdx]?.textContent || '');
+                                let artist = '';
+                                
+                                // Skip if title looks like a Spotify ID
+                                if (/^[a-zA-Z0-9]{20,}$/.test(title)) {
+                                    // This is likely an ID, try next column
+                                    if (cells.length > (songColIdx + 1)) {
+                                        title = cleanText(cells[songColIdx + 1]?.textContent || '');
+                                    }
+                                }
+                                
+                                // Get artist if column exists
+                                if (artistColIdx >= 0 && cells[artistColIdx]) {
+                                    artist = cleanText(cells[artistColIdx].textContent);
+                                    // Skip if artist also looks like ID
+                                    if (/^[a-zA-Z0-9]{20,}$/.test(artist)) {
+                                        artist = '';
+                                    }
+                                }
+                                
+                                // Only add if we have a valid title
+                                if (title && title.length > 2 && !/^[a-zA-Z0-9]{20,}$/.test(title)) {
+                                    tracks.push({
+                                        title: title,
+                                        artists: artist ? [artist] : []
+                                    });
+                                }
+                            }
+                        });
+                        
+                        return tracks;
+                    }
+                    """
+                    
+                    extracted_data = await page.evaluate(extract_js)
+                    
+                    # Convert extracted data to SpotifyTrack objects
+                    for item in extracted_data:
+                        track = SpotifyTrack(
+                            title=item.get('title', ''),
+                            artists=tuple(item.get('artists', []))
+                        )
+                        if track.title:
+                            tracks.append(track)
+                    
+                    if tracks:
+                        logger.debug(f"Chosic extracted {len(tracks)} tracks from table")
+                    else:
+                        logger.debug("Chosic table extraction returned no tracks")
+                    
+                finally:
+                    await browser.close()
+                    
+        except Exception as exc:
+            logger.warning(f"Chosic browser automation failed: {exc}")
+            return None
+        
         if not tracks:
             logger.debug("Chosic parsing returned no tracks")
             return None
-
+        
         return SpotifyCollection(
             source_type="playlist",
             source_name=source_name,
@@ -275,6 +389,7 @@ class SpotifyPlayer:
         return prioritized
 
     def _download_and_parse_export(self, url: str) -> list[SpotifyTrack]:
+        print("Downloading and parsing export from URL:", url)
         request = Request(
             url,
             headers={
@@ -301,6 +416,7 @@ class SpotifyPlayer:
         return csv_tracks
 
     def _parse_csv_export(self, text: str) -> list[SpotifyTrack]:
+        print("Parsing CSV export...")
         rows = list(csv.reader(StringIO(text)))
         if not rows:
             return []
@@ -329,6 +445,7 @@ class SpotifyPlayer:
         return tracks
 
     def _parse_txt_export(self, text: str) -> list[SpotifyTrack]:
+        print("Parsing text export...")
         tracks: list[SpotifyTrack] = []
         for raw_line in (text or "").splitlines():
             line = raw_line.strip()
@@ -353,6 +470,7 @@ class SpotifyPlayer:
         return tracks
 
     def _extract_tracks_from_simple_table(self, html: str) -> list[SpotifyTrack]:
+        print("Extracting tracks from simple table...")
         # Last-resort parser if Chosic renders results directly in HTML table rows.
         row_pattern = re.compile(r"<tr\b[^>]*>(.*?)</tr>", flags=re.IGNORECASE | re.DOTALL)
         cell_pattern = re.compile(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", flags=re.IGNORECASE | re.DOTALL)
