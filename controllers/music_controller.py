@@ -44,6 +44,59 @@ class YouTubeSong(Song):
         await self.player.play(vc, self.url, callback=callback)
 
 
+class LazyResolvingSong(Song):
+    """A song that resolves its YouTube URL on-demand (lazy resolution).
+    
+    This is useful for handling large playlists without resolving all URLs upfront.
+    The resolution happens just before playback to minimize memory usage.
+    """
+    def __init__(self, spotify_track: SpotifyTrack, youtube_player: YouTubePlayer):
+        super().__init__(
+            url="",  # URL not yet resolved
+            title=spotify_track.display_title,
+            requested_query=spotify_track.search_query,
+        )
+        self.spotify_track = spotify_track
+        self.youtube_player = youtube_player
+        self._resolved_url: str | None = None
+        self._is_resolved = False
+
+    async def resolve(self) -> bool:
+        """Resolve the Spotify track to a YouTube URL. Returns True if successful."""
+        if self._is_resolved:
+            return self._resolved_url is not None
+        
+        try:
+            logger.debug(f"Lazy-resolving Spotify track: {self.requested_query}")
+            match = await self.youtube_player.search(self.requested_query)
+            if match is None:
+                logger.warning(f"Failed to find YouTube match for: {self.requested_query}")
+                self._is_resolved = True
+                return False
+            
+            self._resolved_url = match.url
+            self.url = match.url
+            self._is_resolved = True
+            logger.debug(f"Successfully resolved to YouTube URL: {self._resolved_url}")
+            return True
+        except Exception as exc:
+            logger.error(f"Exception during lazy resolution of {self.requested_query}: {exc}")
+            self._is_resolved = True
+            return False
+
+    async def play(self, vc, callback=None):
+        if not self._is_resolved:
+            if not await self.resolve():
+                raise RuntimeError(f"Failed to resolve track: {self.requested_query}")
+        
+        if not self._resolved_url:
+            raise RuntimeError(f"Track was resolved but URL is missing: {self.requested_query}")
+        
+        logger.info(f"Starting lazily-resolved song: {self.title} (search_query={self.requested_query})")
+        logger.debug(f"Track URL: {self._resolved_url}")
+        await self.youtube_player.play(vc, self._resolved_url, callback=callback)
+
+
 async def resolve_spotify_tracks_to_youtube(
     spotify_tracks: Sequence[SpotifyTrack],
     youtube_player: YouTubePlayer,
@@ -89,15 +142,40 @@ async def resolve_spotify_tracks_to_youtube(
     return resolved_tracks, unresolved_tracks
 
 
+def create_lazy_resolving_songs(
+    spotify_tracks: Sequence[SpotifyTrack],
+    youtube_player: YouTubePlayer,
+) -> list[LazyResolvingSong]:
+    """Convert Spotify tracks to lazy-resolving songs for efficient large playlist handling.
+    
+    Args:
+        spotify_tracks: Sequence of SpotifyTrack objects to wrap
+        youtube_player: YouTubePlayer instance for on-demand resolution
+    
+    Returns:
+        List of LazyResolvingSong objects
+    """
+    return [LazyResolvingSong(track, youtube_player) for track in spotify_tracks]
+
+
 class MusicQueue:
-    def __init__(self):
+    def __init__(self, batch_preload_size: int = 20):
+        """Initialize MusicQueue with lazy-loading support for large playlists.
+        
+        Args:
+            batch_preload_size: Number of LazyResolvingSongs to pre-resolve ahead of playback.
+                               Balances between memory usage and latency between songs.
+        """
         self.queue_list: deque[Song] = deque()
         self.currently_playing: Song | None = None
         self.youtube_player = YouTubePlayer()
         self._queue_lock = asyncio.Lock()
         self._worker_task: asyncio.Task | None = None
+        self._preload_task: asyncio.Task | None = None
         self._voice_client = None
         self._announce_channel = None
+        self.batch_preload_size = batch_preload_size
+        self._total_unresolved_songs = 0  # Track total + pending for accurate shuffle info
 
     async def add_to_queue(self, songs: list[Song], vc, announce_channel=None):
         if not songs:
@@ -110,10 +188,16 @@ class MusicQueue:
             if announce_channel is not None:
                 self._announce_channel = announce_channel
             self.queue_list.extend(songs)
+            
+            # Track total unresolved for accurate queue stats
+            lazy_count = sum(1 for s in songs if isinstance(s, LazyResolvingSong))
+            self._total_unresolved_songs += lazy_count
+            
             should_start_worker = self._worker_task is None or self._worker_task.done()
             logger.debug(
-                "Queue updated: added={}, previous_len={}, new_len={}, should_start_worker={}",
+                "Queue updated: added={}, lazy={}, previous_len={}, new_len={}, should_start_worker={}",
                 len(songs),
+                lazy_count,
                 previous_len,
                 len(self.queue_list),
                 should_start_worker,
@@ -121,6 +205,41 @@ class MusicQueue:
             if should_start_worker:
                 self._worker_task = asyncio.create_task(self._playback_loop())
                 logger.debug("Playback worker task created")
+            
+            # Start pre-resolution task if we have lazy songs
+            if lazy_count > 0 and (self._preload_task is None or self._preload_task.done()):
+                self._preload_task = asyncio.create_task(self._preload_next_batch())
+                logger.debug("Pre-load task created")
+
+    async def _preload_next_batch(self):
+        """Continuously pre-resolve the next batch of LazyResolvingSongs in the background."""
+        logger.debug("Pre-load task started")
+        try:
+            while True:
+                await asyncio.sleep(0.1)  # Small delay to avoid busy-loop
+                
+                async with self._queue_lock:
+                    if not self.queue_list:
+                        break
+                    
+                    # Count lazy songs in next batch
+                    lazy_songs = [s for s in list(self.queue_list)[:self.batch_preload_size] 
+                                 if isinstance(s, LazyResolvingSong) and not s._is_resolved]
+                    
+                    if not lazy_songs:
+                        continue
+                
+                # Resolve outside lock to avoid blocking playback
+                for song in lazy_songs[:3]:  # Resolve max 3 at a time to avoid overloading
+                    try:
+                        logger.debug(f"Pre-loading: {song.title}")
+                        await song.resolve()
+                    except Exception as exc:
+                        logger.warning(f"Error during pre-load of {song.title}: {exc}")
+                        
+        except asyncio.CancelledError:
+            logger.debug("Pre-load task cancelled")
+            raise
 
     async def _playback_loop(self):
         logger.debug("Playback loop started")
@@ -185,24 +304,44 @@ class MusicQueue:
         async with self._queue_lock:
             queue_len = len(self.queue_list)
             if queue_len < 2:
+                logger.debug(f"Cannot shuffle: queue already has < 2 items ({queue_len})")
                 return queue_len
             shuffled = list(self.queue_list)
             random.shuffle(shuffled)
             self.queue_list = deque(shuffled)
-            logger.debug("Queue shuffled: items={}", len(self.queue_list))
-            return len(self.queue_list)
+            
+            # Log total items including unresolved
+            total_items = queue_len + self._total_unresolved_songs - sum(
+                1 for s in self.queue_list if isinstance(s, LazyResolvingSong)
+            )
+            logger.debug(
+                "Queue shuffled: queue_items={}, total_including_unresolved={}, total_unresolved={}",
+                queue_len,
+                total_items,
+                self._total_unresolved_songs,
+            )
+            return queue_len
 
     async def teardown(self, vc=None):
         logger.debug("Tearing down music queue state")
         async with self._queue_lock:
             self.queue_list.clear()
             self.currently_playing = None
+            self._total_unresolved_songs = 0
             worker = self._worker_task
             self._worker_task = None
+            preloader = self._preload_task
+            self._preload_task = None
             if vc is None:
                 vc = self._voice_client
             self._voice_client = None
             self._announce_channel = None
+
+        if preloader and not preloader.done():
+            preloader.cancel()
+            with suppress(asyncio.CancelledError):
+                await preloader
+            logger.debug("Pre-load worker cancelled during teardown")
 
         if worker and not worker.done():
             worker.cancel()
@@ -346,6 +485,21 @@ def setup_music_commands(bot):
                 collection.source_name,
                 len(collection.tracks),
             )
+            
+            # Use lazy resolution for large playlists (>50 tracks)
+            # to avoid memory issues and long resolution times
+            if len(collection.tracks) > 50:
+                logger.debug(f"Using lazy resolution for large playlist with {len(collection.tracks)} tracks")
+                lazy_songs = create_lazy_resolving_songs(collection.tracks, youtube_player)
+                await music_queue.add_to_queue(lazy_songs, vc, announce_channel=interaction.channel)
+                await interaction.followup.send(
+                    f"Added {len(lazy_songs)} tracks from Spotify {collection.source_type}: "
+                    f"{collection.source_name}\n"
+                    f"⚡ Using lazy loading - tracks will be resolved as needed."
+                )
+                return
+            
+            # For smaller playlists, use immediate resolution
             resolved_tracks, unresolved_tracks = await resolve_spotify_tracks_to_youtube(
                 collection.tracks,
                 youtube_player,
