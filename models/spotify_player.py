@@ -137,6 +137,10 @@ class SpotifyPlayer:
                         
                         const tracks = [];
                         const rows = table.querySelectorAll('tbody tr');
+                        if (!rows.length) return [];
+                        
+                        // Common UI button/action labels to filter out
+                        const uiLabels = new Set(['delete', 'edit', 'add', 'remove', 'play', 'pause', 'download', 'share', 'more', 'options', 'action', 'track', 'song', '×', '✕', '✘', '...']);
                         
                         // Find column indices for song and artist
                         const headerRow = table.querySelector('thead tr');
@@ -147,28 +151,87 @@ class SpotifyPlayer:
                             const headers = headerRow.querySelectorAll('th');
                             headers.forEach((th, idx) => {
                                 const text = th.textContent.toLowerCase().trim();
-                                if (text.includes('song') || text.includes('track') || text.includes('title')) {
-                                    songColIdx = idx;
+                                // Match song/track columns
+                                if ((text.includes('song') || text.includes('track') || text.includes('title') || text.includes('name')) 
+                                    && !text.includes('artist') && !text.includes('id')) {
+                                    if (songColIdx === -1) songColIdx = idx;  // Take first match
                                 }
-                                if (text.includes('artist')) {
-                                    artistColIdx = idx;
+                                // Match artist columns
+                                if (text.includes('artist') || text.includes('by')) {
+                                    if (artistColIdx === -1) artistColIdx = idx;  // Take first match
                                 }
                             });
                         }
                         
-                        // If we didn't find headers, assume first is song, second is artist
-                        if (songColIdx === -1) songColIdx = 0;
-                        if (artistColIdx === -1) artistColIdx = 1;
+                        // Fallback: analyze first data row to detect columns by content
+                        if (songColIdx === -1 || artistColIdx === -1) {
+                            const firstRow = rows[0];
+                            if (firstRow) {
+                                const cells = firstRow.querySelectorAll('td');
+                                for (let i = 0; i < cells.length; i++) {
+                                    const cellText = cells[i].textContent.trim();
+                                    const isId = /^[a-zA-Z0-9]{20,}$/.test(cellText);  // Spotify IDs are 22 alphanumeric chars
+                                    const hasNumbers = /\\d{2,}/.test(cellText);
+                                    
+                                    if (songColIdx === -1 && !isId && !hasNumbers && cellText.length > 3) {
+                                        songColIdx = i;
+                                    } else if (artistColIdx === -1 && i !== songColIdx && !isId && !hasNumbers && cellText.length > 2) {
+                                        artistColIdx = i;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Default fallback (skip ID columns which are typically first)
+                        if (songColIdx === -1) songColIdx = 1;  // Skip column 0 (likely ID)
+                        if (artistColIdx === -1) artistColIdx = 2;
+                        
+                        // Helper to clean text of UI labels and extra whitespace
+                        function cleanText(text) {
+                            if (!text) return '';
+                            
+                            // Remove common UI button text patterns (case-insensitive)
+                            let cleaned = text
+                                .replace(/delete\\s+track[\\s\\n]*/gi, '')
+                                .replace(/edit\\s+track[\\s\\n]*/gi, '')
+                                .replace(/remove\\s+track[\\s\\n]*/gi, '');
+                            
+                            // Split by newlines/whitespace and filter
+                            const parts = cleaned.split(/[\\n\\r]+/).map(p => p.trim()).filter(p => {
+                                const lower = p.toLowerCase();
+                                // Skip if it's a UI label or too short
+                                return p.length > 1 && !uiLabels.has(lower) && !/^[❌✕×✘]+$/.test(p);
+                            });
+                            
+                            // Join with space, collapse multiple spaces
+                            return parts.join(' ').replace(/\\s+/g, ' ').trim();
+                        }
                         
                         rows.forEach(row => {
                             const cells = row.querySelectorAll('td');
                             if (cells.length > songColIdx) {
-                                const title = cells[songColIdx]?.textContent?.trim() || '';
-                                const artist = (artistColIdx >= 0 && cells[artistColIdx]) 
-                                    ? cells[artistColIdx].textContent.trim() 
-                                    : '';
+                                let title = cleanText(cells[songColIdx]?.textContent || '');
+                                let artist = '';
                                 
-                                if (title) {
+                                // Skip if title looks like a Spotify ID
+                                if (/^[a-zA-Z0-9]{20,}$/.test(title)) {
+                                    // This is likely an ID, try next column
+                                    if (cells.length > (songColIdx + 1)) {
+                                        title = cleanText(cells[songColIdx + 1]?.textContent || '');
+                                    }
+                                }
+                                
+                                // Get artist if column exists
+                                if (artistColIdx >= 0 && cells[artistColIdx]) {
+                                    artist = cleanText(cells[artistColIdx].textContent);
+                                    // Skip if artist also looks like ID
+                                    if (/^[a-zA-Z0-9]{20,}$/.test(artist)) {
+                                        artist = '';
+                                    }
+                                }
+                                
+                                // Only add if we have a valid title
+                                if (title && title.length > 2 && !/^[a-zA-Z0-9]{20,}$/.test(title)) {
                                     tracks.push({
                                         title: title,
                                         artists: artist ? [artist] : []
